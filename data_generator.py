@@ -1,17 +1,20 @@
 CONFIG = {
-    "renderer": "RayTracedLighting",
+    "renderer": "PathTracing",
     "headless": True,
-    "width": 1024,
-    "height": 1024,
+    "width": 512,
+    "height": 512,
     "num_envs": 4,
     "num_samples": 20000,
     "dataset_name": "quad_arm_20k",
+    "multi_gpu": False,
+    "num_lights": 3,
+    # "anti_aliasing": "FXAA",
 }
 
 # Open Simulation App
 from omni.isaac.kit import SimulationApp
 
-simulation_app = SimulationApp({"headless": CONFIG["headless"]})
+simulation_app = SimulationApp(launch_config=CONFIG)
 
 import os
 import json
@@ -42,53 +45,127 @@ class DataGenerator:
         self.num_envs = CONFIG["num_envs"]
         self.world = self._create_world()
         self.distractor_view, self.franka_view = self.add_view()
+
         self.world.reset()
         self.config_dr()
         self.camera, self.cam_render = self.create_cam_render()
         self.camera = Camera("/World/camera")
         self.camera.set_resolution((CONFIG["width"], CONFIG["height"]))
         self.rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
-        self.seg_annot = rep.AnnotatorRegistry.get_annotator("instance_id_segmentation", init_params={"colorize": True})
+        self.seg_annot = rep.AnnotatorRegistry.get_annotator(
+            "instance_id_segmentation", init_params={"colorize": True}
+        )
         self.rgb_annot.attach(self.cam_render)
         self.seg_annot.attach(self.cam_render)
         self.franka_kf = FrankaFK()
         # self.writer = self.writer(
         #     out_dir=os.path.join(os.getcwd(), "out"))
 
+    def _setup_randomizers(self):
+        """Add domain randomization with Replicator Randomizers"""
+
+        # Create and randomize sphere lights
+        def randomize_sphere_lights():
+            lights = rep.create.light(
+                light_type="Sphere",
+                color=rep.distribution.uniform(
+                    (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)
+                ),
+                intensity=rep.distribution.uniform(100000, 3000000),
+                position=rep.distribution.uniform(
+                    (-250, -250, -250), (250, 250, 100)
+                ),
+                scale=rep.distribution.uniform(1, 20),
+                count=CONFIG["num_lights"],
+            )
+            return lights.node
+
+        # Randomize prim colors
+        def randomize_colors(prim_path_regex):
+            prims = rep.get.prims(path_pattern=prim_path_regex)
+            mats = rep.create.material_omnipbr(
+                metallic=rep.distribution.uniform(0.0, 1.0),
+                roughness=rep.distribution.uniform(0.0, 1.0),
+                diffuse=rep.distribution.uniform((0, 0, 0), (1, 1, 1)),
+                count=100,
+            )
+            with prims:
+                rep.randomizer.materials(mats)
+            return prims.node
+
+        rep.randomizer.register(randomize_sphere_lights, override=True)
+        rep.randomizer.register(randomize_colors, override=True)
+
+        with rep.trigger.on_frame():
+            rep.randomizer.randomize_sphere_lights()
+            rep.randomizer.randomize_colors("(?=.*shape)(?=.*nonglass).*")
+
     def _create_world(self):
-        world = World(stage_units_in_meters=1.0, physics_prim_path="/physicsScene", backend="numpy")
+        # rep.settings.set_render_rtx_realtime()
+        world = World(
+            stage_units_in_meters=1.0,
+            physics_prim_path="/physicsScene",
+            backend="numpy",
+        )
         assets_root_path = utils.nucleus.get_assets_root_path()
         if assets_root_path is None:
             carb.log_error("Could not find Isaac Sim assets folder, closing...")
             simulation_app.close()
-        usd_path = assets_root_path + "/Isaac/Environments/Grid/default_environment.usd"
-        utils.stage.add_reference_to_stage(usd_path=usd_path, prim_path="/World/defaultGroundPlane")
+        distance_light = rep.create.light(
+            rotation=(400, -23, -94),
+            intensity=3000,
+            temperature=5000,
+            light_type="distant",
+        )
+
+        usd_path = (
+            assets_root_path
+            + "/Isaac/Environments/Grid/default_environment.usd"
+        )
+        utils.stage.add_reference_to_stage(
+            usd_path=usd_path, prim_path="/World/defaultGroundPlane"
+        )
         cloner = GridCloner(spacing=1.5)
         cloner.define_base_env("/World/envs")
         utils.prims.define_prim("/World/envs/env_0")
 
         # set up the first environment
-        DynamicSphere(prim_path="/World/envs/env_0/object", radius=0.1, position=np.array([0.75, 0.0, 0.2]))
+        DynamicSphere(
+            prim_path="/World/envs/env_0/object",
+            radius=0.1,
+            position=np.array([0.75, 0.0, 0.2]),
+        )
         utils.stage.add_reference_to_stage(
-            usd_path=assets_root_path + "/Isaac/Robots/Franka/franka.usd", prim_path="/World/envs/env_0/franka"
+            usd_path=assets_root_path + "/Isaac/Robots/Franka/franka.usd",
+            prim_path="/World/envs/env_0/franka",
         )
         # clone environments
         prim_paths = cloner.generate_paths("/World/envs/env", self.num_envs)
-        cloner.clone(source_prim_path="/World/envs/env_0", prim_paths=prim_paths)
+        cloner.clone(
+            source_prim_path="/World/envs/env_0", prim_paths=prim_paths
+        )
         # assign semantic labels
         utils.semantics.add_update_semantics(
-            utils.prims.get_prim_at_path("/World/envs/env_0/object"), semantic_label="sphere"
+            utils.prims.get_prim_at_path("/World/envs/env_0/object"),
+            semantic_label="sphere",
         )
         utils.semantics.add_update_semantics(
-            utils.prims.get_prim_at_path("/World/envs/env_0/franka"), semantic_label="franka"
+            utils.prims.get_prim_at_path("/World/envs/env_0/franka"),
+            semantic_label="franka",
         )
+        world.play()
+
         return world
 
     def add_view(self):
         # creates the views and set up world
-        distractor_view = RigidPrimView(prim_paths_expr="/World/envs/*/object", name="distractor_view")
+        distractor_view = RigidPrimView(
+            prim_paths_expr="/World/envs/*/object", name="distractor_view"
+        )
         #
-        franka_view = ArticulationView(prim_paths_expr="/World/envs/*/franka", name="franka_view")
+        franka_view = ArticulationView(
+            prim_paths_expr="/World/envs/*/franka", name="franka_view"
+        )
 
         self.world.scene.add(distractor_view)
         self.world.scene.add(franka_view)
@@ -101,10 +178,16 @@ class DataGenerator:
             prim_type="Camera",
             position=[4.8, 4.0, 2.5],
             orientation=[0.35377525, 0.24567726, 0.52083579, 0.73703178],
-            attributes={"focusDistance": 400, "focalLength": 30, "clippingRange": (0.1, 10000000)},
+            attributes={
+                "focusDistance": 400,
+                "focalLength": 35,
+                "clippingRange": (0.1, 10000),
+            },
         )
         RESOLUTION = (CONFIG["width"], CONFIG["height"])
-        cam_render = rep.create.render_product(str(cam_prim.GetPrimPath()), RESOLUTION)
+        cam_render = rep.create.render_product(
+            str(cam_prim.GetPrimPath()), RESOLUTION
+        )
         return cam_prim, cam_render
 
     def config_dr(self):
@@ -113,6 +196,9 @@ class DataGenerator:
         dr.physics_view.register_simulation_context(self.world)
         dr.physics_view.register_rigid_prim_view(self.distractor_view)
         dr.physics_view.register_articulation_view(self.franka_view)
+
+        self._setup_randomizers()
+
         with dr.trigger.on_rl_frame(num_envs=self.num_envs):
             # with dr.gate.on_interval(interval=20):
             #     dr.physics_view.randomize_simulation_context(
@@ -120,6 +206,8 @@ class DataGenerator:
             #         gravity=rep.distribution.uniform((1, 1, 0.0), (1, 1, 2.0))
             #     )
             with dr.gate.on_interval(interval=50):
+                # self._randomize_lights()
+
                 dr.physics_view.randomize_rigid_prim_view(
                     view_name=self.distractor_view.name,
                     operation="direct",
@@ -129,33 +217,45 @@ class DataGenerator:
                 dr.physics_view.randomize_articulation_view(
                     view_name=self.franka_view.name,
                     operation="direct",
-                    joint_velocities=rep.distribution.uniform(tuple([-5] * num_dof), tuple([5] * num_dof)),
+                    joint_velocities=rep.distribution.uniform(
+                        tuple([-5] * num_dof), tuple([5] * num_dof)
+                    ),
                 )
             with dr.gate.on_env_reset():
                 dr.physics_view.randomize_rigid_prim_view(
                     view_name=self.distractor_view.name,
                     operation="additive",
-                    position=rep.distribution.normal((0.0, 0.0, 0.0), (0.2, 0.2, 0.0)),
+                    position=rep.distribution.normal(
+                        (0.0, 0.0, 0.0), (0.2, 0.2, 0.0)
+                    ),
                     velocity=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 )
                 dr.physics_view.randomize_articulation_view(
                     view_name=self.franka_view.name,
                     operation="additive",
-                    joint_positions=rep.distribution.uniform(tuple([-0.8] * num_dof), tuple([0.8] * num_dof)),
-                    position=rep.distribution.normal((0.0, 0.0, 0.0), (0.2, 0.2, 0.0)),
+                    joint_positions=rep.distribution.uniform(
+                        tuple([-0.8] * num_dof), tuple([0.8] * num_dof)
+                    ),
+                    position=rep.distribution.normal(
+                        (0.0, 0.0, 0.0), (0.2, 0.2, 0.0)
+                    ),
                 )
 
     def write_rgb_data(self, rgb_data, file_path, debug_sync=False):
-        rgb = rgb_data[:, :, :3].astype(np.uint8)
-        rgb_img = Image.fromarray(rgb, "RGB")
-        # rgb_image_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape, -1)
-        # rgb_img = Image.fromarray(rgb_image_data, "RGBA")
+        # rgb = rgb_data[:, :, :3].astype(np.uint8)
+        # rgb_img = Image.fromarray(rgb, "RGB")
+        rgb_image_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(
+            *rgb_data.shape, -1
+        )
+        rgb_img = Image.fromarray(rgb_image_data, "RGBA")
         if debug_sync:
             joint_positions = self.get_joint_positions(group_by_envs=False)
             draw = ImageDraw.Draw(rgb_img)
             # base_points = self.franka_view.get_world_poses()
             # print(joint_positions)
-            cam_coords = self.camera.get_image_coords_from_world_points(joint_positions)
+            cam_coords = self.camera.get_image_coords_from_world_points(
+                joint_positions
+            )
             for im_coord in cam_coords.tolist():
                 circ_size = 2
                 circ_coord = (
@@ -173,7 +273,9 @@ class DataGenerator:
         id_to_labels = seg_data["info"]["idToLabels"]
         with open(file_path + ".json", "w") as f:
             json.dump(id_to_labels, f)
-        seg_image_data = np.frombuffer(seg_data["data"], dtype=np.uint8).reshape(*seg_data["data"].shape, -1)
+        seg_image_data = np.frombuffer(
+            seg_data["data"], dtype=np.uint8
+        ).reshape(*seg_data["data"].shape, -1)
         seg_img = Image.fromarray(seg_image_data, "RGBA")
         seg_img.save(file_path + ".png")
 
@@ -197,10 +299,12 @@ class DataGenerator:
             else:
                 out += X[:, :3, 3].tolist()
         return out
-    
-    def get_joint_positions_in_cam(self) -> list: 
+
+    def get_joint_positions_in_cam(self) -> list:
         joint_positions = self.get_joint_positions(group_by_envs=False)
-        return self.camera.get_image_coords_from_world_points(joint_positions).tolist()
+        return self.camera.get_image_coords_from_world_points(
+            joint_positions
+        ).tolist()
 
     def get_robot_base_poses(self) -> list:
         base_t_quat = self.franka_view.get_world_poses()
@@ -208,18 +312,32 @@ class DataGenerator:
         for i in range(self.num_envs):
             # get manipulator base transformation w.r.t the world frame,
             # [x, y, z, quat_w, quat_x, quat_y, quat_z]
-            out.append(base_t_quat[0][i].tolist()+base_t_quat[1][i].tolist())
+            out.append(base_t_quat[0][i].tolist() + base_t_quat[1][i].tolist())
         return out
-        
+
     def save_annot(self, frame_id, debug_sync=False):
-        with open(f"{self.out_dir}/meta/{frame_id}_joint_angles" + ".json", "w") as f:
+        with open(
+            f"{self.out_dir}/meta/{frame_id}_joint_angles" + ".json", "w"
+        ) as f:
             json.dump(self.franka_view.get_joint_positions().tolist(), f)
-        with open(f"{self.out_dir}/meta/{frame_id}_base_poses" + ".json", "w") as f:
+        with open(
+            f"{self.out_dir}/meta/{frame_id}_base_poses" + ".json", "w"
+        ) as f:
             json.dump(self.get_robot_base_poses(), f)
-        with open(f"{self.out_dir}/meta/{frame_id}_joint_cam_coords" + ".json", "w") as f:
+        with open(
+            f"{self.out_dir}/meta/{frame_id}_joint_cam_coords" + ".json", "w"
+        ) as f:
             json.dump(self.get_joint_positions_in_cam(), f)
-        self.write_rgb_data(self.rgb_annot.get_data(), f"{self.out_dir}/rgb/{frame_id}_rgb", debug_sync)
-        self.write_seg_data(self.seg_annot.get_data(), f"{self.out_dir}/segmentation/{frame_id}_seg")
+
+        self.write_rgb_data(
+            self.rgb_annot.get_data(),
+            f"{self.out_dir}/rgb/{frame_id}_rgb",
+            debug_sync,
+        )
+        self.write_seg_data(
+            self.seg_annot.get_data(),
+            f"{self.out_dir}/segmentation/{frame_id}_seg",
+        )
         # get manipulator proprioceptive readings
         # print(self.franka_view.body_names)
 
@@ -234,8 +352,12 @@ class DataGenerator:
 if __name__ == "__main__":
     from tqdm import tqdm
 
-    dataset_path = os.path.join(os.path.expanduser( '~' ), "Dataset", CONFIG["dataset_name"])
-    print(f"Save dataset to {dataset_path}, dataset size: {CONFIG['num_samples']}")
+    dataset_path = os.path.join(
+        os.path.expanduser("~"), "Dataset", CONFIG["dataset_name"]
+    )
+    print(
+        f"Save dataset to {dataset_path}, dataset size: {CONFIG['num_samples']}"
+    )
     data_generator = DataGenerator(dataset_path)
     # Run the application for several frames to allow the materials to load
     for _ in range(20):
@@ -253,7 +375,7 @@ if __name__ == "__main__":
             scene_idx += 1
             sample_idx = 0
         dr.physics_view.step_randomization(reset_inds)
-        data_generator.world.step(render=True)
+        data_generator.world.step(render=False)
         # TODO: Check update -- Multiple render() calls for getting around the image buffer delay bug
         # https://forums.developer.nvidia.com/t/problem-with-images-i-get-from-cameras/252380/3
         if frame_idx % 2 == 0:
@@ -262,7 +384,7 @@ if __name__ == "__main__":
             data_generator.world.render()
             data_generator.world.render()
             data_generator.world.render()
-            data_generator.world.render()
+            # data_generator.world.render()
             file_prefix = f"{scene_idx:04}_{sample_idx:03}"
             data_generator.save_annot(file_prefix)
             sample_idx += 1

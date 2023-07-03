@@ -211,14 +211,14 @@ class DataGenerator:
             out.append(base_t_quat[0][i].tolist()+base_t_quat[1][i].tolist())
         return out
         
-    def save_annot(self, frame_id):
+    def save_annot(self, frame_id, debug_sync=False):
         with open(f"{self.out_dir}/meta/{frame_id}_joint_angles" + ".json", "w") as f:
             json.dump(self.franka_view.get_joint_positions().tolist(), f)
         with open(f"{self.out_dir}/meta/{frame_id}_base_poses" + ".json", "w") as f:
             json.dump(self.get_robot_base_poses(), f)
         with open(f"{self.out_dir}/meta/{frame_id}_joint_cam_coords" + ".json", "w") as f:
             json.dump(self.get_joint_positions_in_cam(), f)
-        self.write_rgb_data(self.rgb_annot.get_data(), f"{self.out_dir}/rgb/{frame_id}_rgb")
+        self.write_rgb_data(self.rgb_annot.get_data(), f"{self.out_dir}/rgb/{frame_id}_rgb", debug_sync)
         self.write_seg_data(self.seg_annot.get_data(), f"{self.out_dir}/segmentation/{frame_id}_seg")
         # get manipulator proprioceptive readings
         # print(self.franka_view.body_names)
@@ -246,27 +246,26 @@ if __name__ == "__main__":
     sample_idx = 0
 
     for _ in tqdm(range(CONFIG["num_samples"])):
-        if data_generator.world.is_playing():
-            reset_inds = list()
-            if frame_idx % 50 == 0:
-                # triggers reset every n steps
-                reset_inds = np.arange(data_generator.num_envs)
-                scene_idx += 1
-                sample_idx = 0
-            dr.physics_view.step_randomization(reset_inds)
-            data_generator.world.step(render=True)
-            # TODO: Check update -- Multiple render() calls for getting around the image buffer delay bug
-            # https://forums.developer.nvidia.com/t/problem-with-images-i-get-from-cameras/252380/3
-            if frame_idx % 2 == 0:
-                data_generator.world.render()
-                data_generator.world.render()
-                data_generator.world.render()
-                data_generator.world.render()
-                data_generator.world.render()
-                data_generator.world.render()
-                file_prefix = f"{scene_idx:03}_{sample_idx:03}"
-                data_generator.save_annot(file_prefix)
-                sample_idx += 1
-            frame_idx += 1
+        reset_inds = list()
+        if frame_idx % 50 == 0:
+            # triggers reset every n steps
+            reset_inds = np.arange(data_generator.num_envs)
+            scene_idx += 1
+            sample_idx = 0
+        dr.physics_view.step_randomization(reset_inds)
+        data_generator.world.step(render=True)
+        # TODO: Check update -- Multiple render() calls for getting around the image buffer delay bug
+        # https://forums.developer.nvidia.com/t/problem-with-images-i-get-from-cameras/252380/3
+        if frame_idx % 2 == 0:
+            data_generator.world.render()
+            data_generator.world.render()
+            data_generator.world.render()
+            data_generator.world.render()
+            data_generator.world.render()
+            data_generator.world.render()
+            file_prefix = f"{scene_idx:04}_{sample_idx:03}"
+            data_generator.save_annot(file_prefix)
+            sample_idx += 1
+        frame_idx += 1
 
 simulation_app.close()

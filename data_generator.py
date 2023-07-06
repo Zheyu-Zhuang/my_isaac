@@ -426,6 +426,7 @@ if __name__ == "__main__":
                     "texture:file",
                     rep.distribution.choice(data_generator.dome_texture_paths),
                 )
+            #TODO: speed up texture loading, and add dome light rotation
             data_generator.randomize_camera_pose()
             reset_inds = np.arange(data_generator.num_envs)
             scene_idx += 1

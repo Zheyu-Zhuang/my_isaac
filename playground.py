@@ -1,16 +1,17 @@
 import os
+
 from omni.isaac.kit import SimulationApp
 
 # Open Sim APP
 config = {"headless": False}
 simulation_app = SimulationApp(config)
 
+import numpy as np
 # Any Omniverse level imports MUST occur after SimulationApp class is instantiated. 
 from omni.isaac.core import World
-from omni.isaac.core.utils import stage, prims
+from omni.isaac.core.utils import prims, stage
 from omni.isaac.franka import Franka
 from omni.isaac.sensor import Camera
-import numpy as np
 
 # Load Pre-made scene
 # TODO: Move scene file path to config file
@@ -29,8 +30,6 @@ sim_world.reset()
 
 
 #
-# TODO: get image
-# TODO: Scene and robot texture randomisation
 
 sim_world.initialize_physics()
 
@@ -38,11 +37,6 @@ bot.initialize()
 camera.initialize()
 
 
-# TODO: Randomly add scene distractors
-# TODO: Add a camera and assign random pose sampled from a hemisphere with centered around the manipulator base and optical axis jitter within a cone
-# TODO: [Later] Add and randomly move camera based on config
-# TODO: Move End-effector to random poses by solving ik, possibly load from saved valid joint poses.
-# TODO: Collect RGB, Depth, Instance-mask, joint poses
 import matplotlib.pyplot as plt
 
 while True:
